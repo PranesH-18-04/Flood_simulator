@@ -1,0 +1,430 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Thamaraipakkam Flood Simulator (Renkeer Prototype)</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/3.9.1/chart.min.js"></script>
+    <style>
+        :root {
+            --bg: #1e1e2f; --panel: #2a2a40; --text: #e0e0e0;
+            --accent: #4caf50; --warn: #ff9800; --danger: #f44336;
+        }
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: var(--bg); color: var(--text);
+            margin: 0; padding: 20px;
+        }
+        h1, h2, h3 { margin-top: 0; }
+        .grid { display: grid; grid-template-columns: 1fr 320px; gap: 20px; }
+        .panel {
+            background: var(--panel); padding: 20px; border-radius: 8px;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.3); margin-bottom: 20px;
+        }
+        .flex-between { display: flex; justify-content: space-between; align-items: center; }
+        button {
+            background: var(--accent); color: white; border: none;
+            padding: 10px 20px; border-radius: 4px; cursor: pointer; font-weight: bold;
+        }
+        button:hover { opacity: 0.9; }
+        button.danger { background: var(--danger); }
+        .badge { padding: 15px; border-radius: 8px; text-align: center; font-size: 1.2em; font-weight: bold; }
+        .status-dot { display: inline-block; width: 12px; height: 12px; border-radius: 50%; background: #555; }
+        .status-dot.active { background: #00ff00; box-shadow: 0 0 8px #00ff00; }
+        input[type="number"] { width: 80px; padding: 5px; background: #1e1e2f; color: white; border: 1px solid #555; }
+        .log-box { font-family: monospace; font-size: 0.9em; height: 150px; overflow-y: auto; background: #111; padding: 10px; }
+        canvas { max-height: 250px; }
+        .river-profile { width: 100%; height: 150px; background: #111; position: relative; border-bottom: 4px solid #555; }
+        .water-level { position: absolute; bottom: 0; left: 0; width: 100%; background: rgba(33, 150, 243, 0.5); transition: height 0.3s; }
+        .dam-structure { position: absolute; bottom: 0; left: 10%; width: 40px; height: 80%; background: #777; }
+        .village-structure { position: absolute; bottom: 0; right: 10%; width: 60px; height: 30%; background: #8d6e63; }
+        .limitations { font-size: 0.85em; color: #aaa; border-left: 3px solid #ff9800; padding-left: 10px; margin-top: 10px; }
+        .flag-box { border: 1px solid #ff9800; background: rgba(255,152,0,0.1); padding: 5px; font-size: 0.8em; margin-top: 10px; display: none; }
+    </style>
+</head>
+<body>
+
+    <div class="flex-between">
+        <h1>Thamaraipakkam Flood Early-Warning Simulator</h1>
+        <div>
+            <span class="status-dot" id="connDot"></span>
+            <span id="connStatus" style="margin-right: 15px;">Disconnected</span>
+            <button id="btnConnect">Connect ESP32 (USB)</button>
+            <button id="btnDisconnect" class="danger" style="display:none;">Disconnect</button>
+        </div>
+    </div>
+
+    <div class="grid">
+        <!-- Main Content -->
+        <div>
+            <div class="panel">
+                <div class="flex-between">
+                    <h2>Live Alert Status</h2>
+                    <span style="font-size: 0.8em; color: #ff9800; border: 1px solid #ff9800; padding: 3px 6px; border-radius: 4px;">
+                        Velocity source: PLACEHOLDER (Renkeer assumed)
+                    </span>
+                </div>
+                <div id="alertBadge" class="badge" style="background: var(--accent);">
+                    <div id="alertTitleEn">STAGE 0: Normal</div>
+                    <div id="alertTitleTa" style="font-size: 0.8em; margin-top:5px;">இயல்பான நிலை</div>
+                    <div id="alertAction" style="font-size: 0.7em; margin-top:10px; font-weight:normal;">No action required.</div>
+                </div>
+                <div style="margin-top: 15px; display: flex; justify-content: space-around;">
+                    <div><strong>Level from Bed:</strong> <span id="valLevel">0.0</span> cm</div>
+                    <div><strong>Head over Crest:</strong> <span id="valHead">0.0</span> cm</div>
+                    <div><strong>RoR:</strong> <span id="valRoR">0.0</span> cm/min</div>
+                    <div><strong>Velocity:</strong> <span id="valVel">0.0</span> m/s</div>
+                    <div><strong>Wave Arrival:</strong> <span id="valArrival">--</span> min</div>
+                </div>
+                <div id="velFlag" class="flag-box">
+                    ⚠️ <b>Sensor Discrepancy:</b> Measured velocity diverges from Manning's estimate by >50%. Verify radar calibration or channel roughness.
+                </div>
+            </div>
+
+            <div class="panel">
+                <h2>River Profile (Chainage 0m Check Dam -> 0.8km Village)</h2>
+                <div class="river-profile">
+                    <div class="water-level" id="vizWater" style="height: 20%;"></div>
+                    <div class="dam-structure"></div>
+                    <div class="village-structure"></div>
+                    <span style="position: absolute; bottom: 82%; left: 8%; font-size:12px;">Dam Crest (0m)</span>
+                    <span style="position: absolute; bottom: 32%; right: 8%; font-size:12px;">Ammanambakkam/Thamaraipakkam (800m)</span>
+                </div>
+            </div>
+
+            <div class="panel">
+                <h2>Telemetry Timeline</h2>
+                <canvas id="telemetryChart"></canvas>
+            </div>
+        </div>
+
+        <!-- Sidebar -->
+        <div>
+            <div class="panel">
+                <h3>Simulation & Testing</h3>
+                <button id="btnSimulate" style="width:100%; margin-bottom: 10px; background:#2196F3;">Start SIMULATION</button>
+                <div class="limitations">
+                    <b>Accuracy & Limitations:</b> Uses assumed DEM data and a local ultrasonic sensor at Chainage 0m. The YF-S201 is a placeholder simulating a Renkeer RS-series radar. <br><br>
+                    <b>Boundary Condition:</b> Upstream of the dam is entirely unmeasured; flood waves arrive with zero early warning before hitting the sensor. <b>Cannot replace official TN SDMA warnings.</b>
+                </div>
+            </div>
+
+            <div class="panel">
+                <h3>Dam Geometry & Calibration</h3>
+                <label>Sensor from Bed (X cm): <input type="number" id="calSensorX" value="130"></label><br>
+                <label>Sensor above Crest (Y cm): <input type="number" id="calSensorY" value="30"></label><br>
+                <label>Manning's n: <input type="number" id="calN" value="0.035" step="0.005"></label><br>
+                <label>Reach L (m): <input type="number" id="calL" value="800"></label><br>
+                <label>Pipe Area (m²): <input type="number" id="calArea" value="0.000126" step="0.000001" title="For YF-S201 bench test calibration"></label><br>
+                <button id="btnApplyCal" style="margin-top: 10px; width:100%;">Apply</button>
+            </div>
+
+            <div class="panel">
+                <h3>Raw JSON Stream</h3>
+                <div class="log-box" id="serialLog"></div>
+                <button id="btnCsv" style="margin-top:10px; width:100%; background:#795548;">Download CSV</button>
+            </div>
+        </div>
+    </div>
+
+<script>
+    // --- REACH TOPOLOGY JSON ---
+    const reachData = {
+        reach_id: 1, name: "Chainage 0m (Dam) to Ammanambakkam (800m)",
+        length_m: 800, slope_m_per_m: 0.001, width_m: 120,
+        mannings_n: 0.035, cross_section: "trapezoidal"
+    };
+
+    // --- STATE ---
+    let port, reader, inputDone, outputStream, inputStream;
+    let isConnected = false, isSimulating = false, simInterval;
+    let history = []; 
+    let lastDataTime = Date.now();
+    let consecutiveTriggers = 0;
+    
+    // Calibration State: X and Y offsets
+    let SENSOR_X_CM = 130; // Height from riverbed to sensor
+    let SENSOR_Y_CM = 30;  // Height from crest to sensor (Positive = sensor is above crest)
+    let DAM_CREST_CM = SENSOR_X_CM - SENSOR_Y_CM; // Calculate crest height from bed
+    
+    let PIPE_AREA_M2 = 0.00012667;
+
+    // --- DOM Elements ---
+    const elConnStatus = document.getElementById('connStatus');
+    const elConnDot = document.getElementById('connDot');
+    const elLog = document.getElementById('serialLog');
+    const badge = document.getElementById('alertBadge');
+    
+    // --- CHART.JS SETUP ---
+    const ctx = document.getElementById('telemetryChart').getContext('2d');
+    const chart = new Chart(ctx, {
+        type: 'line',
+        data: { labels: [], datasets: [
+            { label: 'Level (cm)', data: [], borderColor: '#2196f3', yAxisID: 'y' },
+            { label: 'RoR (cm/min)', data: [], borderColor: '#ff9800', yAxisID: 'y1' }
+        ]},
+        options: {
+            responsive: true, animation: false,
+            scales: {
+                y: { type: 'linear', display: true, position: 'left' },
+                y1: { type: 'linear', display: true, position: 'right', grid: {drawOnChartArea: false} }
+            }
+        }
+    });
+
+    // --- HYDRAULIC MATH ---
+    function processReading(data) {
+        if (data.dist_cm === null || data.dist_cm < 0) return;
+        
+        // Sensor reads distance downwards to water.
+        // Level from bed = Sensor height from bed (X) - measured distance
+        let currentLevel = SENSOR_X_CM - data.dist_cm;
+        let ror = 0, waveTravelMin = 0;
+        let tNow = Date.now();
+
+        // 1. Rate of Rise (cm/min) using last 5 readings
+        if (history.length > 5) {
+            let past = history[history.length - 5];
+            let dt_min = (tNow - past.t) / 60000;
+            if (dt_min > 0) ror = (currentLevel - past.level) / dt_min;
+        }
+
+        // Head is water level above the crest
+        let H_meters = (currentLevel - DAM_CREST_CM) / 100.0;
+        
+        // 2. Velocity Math (Override ESP32 calc with live Pipe Area calibration)
+        let measured_v = 0.0;
+        if (data.flow_lpm !== undefined && data.flow_lpm !== null) {
+            measured_v = (data.flow_lpm / 60000.0) / PIPE_AREA_M2;
+        }
+
+        // Manning's Theoretical Velocity
+        let manning_v = 0;
+        if (H_meters > 0) {
+            let n = reachData.mannings_n;
+            let S = reachData.slope_m_per_m;
+            manning_v = (1/n) * Math.pow(H_meters, 0.667) * Math.pow(S, 0.5);
+            
+            // 3. Routing / Wave arrival using kinematic wave (c = 5/3 v)
+            let c = (5/3) * measured_v; 
+            if (c <= 0) c = (5/3) * manning_v; // fallback
+            
+            let travelSecs = reachData.length_m / c;
+            waveTravelMin = travelSecs / 60;
+        }
+
+        // Flag discrepancy if difference is > 50%
+        let flagBox = document.getElementById('velFlag');
+        if (H_meters > 0.1 && measured_v > 0 && Math.abs(measured_v - manning_v) / manning_v > 0.5) {
+            flagBox.style.display = "block";
+        } else {
+            flagBox.style.display = "none";
+        }
+
+        updateUI(currentLevel, H_meters * 100, ror, measured_v, waveTravelMin);
+        
+        history.push({t: tNow, level: currentLevel, ror: ror, vel: measured_v});
+        if (history.length > 60) history.shift();
+        
+        updateChart();
+        evaluateAlertLogic(currentLevel, ror, waveTravelMin, H_meters);
+    }
+
+    // --- ALERT LOGIC ---
+    let currentStage = 0;
+    function evaluateAlertLogic(level, ror, travelMin, H_meters) {
+        let newStage = 0;
+        
+        // Stages are strictly driven by level and RoR
+        if (H_meters > 0.5 && ror > 1.0) newStage = 4; // >50cm over crest + rising fast
+        else if (H_meters > 0.2) newStage = 3; // >20cm over crest
+        else if (H_meters > 0) newStage = 2; // Overflowing
+        else if (level > DAM_CREST_CM - 20 && ror > 0.5) newStage = 1; // Nearing crest
+        
+        if (newStage > currentStage) {
+            consecutiveTriggers++;
+            if (consecutiveTriggers >= 3) {
+                currentStage = newStage;
+                consecutiveTriggers = 0;
+            }
+        } else if (newStage < currentStage) {
+            if (level < DAM_CREST_CM - 25) currentStage = 0;
+            consecutiveTriggers = 0;
+        } else {
+            consecutiveTriggers = 0;
+        }
+
+        applyAlertStage(currentStage, travelMin);
+    }
+
+    function applyAlertStage(stage, travelMin) {
+        let leadTime = Math.max(0, travelMin - 5); // Assuming 5 mins to physically evacuate
+        let conf = travelMin > 0 ? " (±2m)" : "";
+
+        const stages = [
+            { bg: 'var(--accent)', en: 'STAGE 0: Normal', ta: 'இயல்பான நிலை', act: 'No action required.' },
+            { bg: '#cddc39', en: 'STAGE 1: Advisory', ta: 'எச்சரிக்கை - நீர்மட்டம் உயர்கிறது', act: 'Water rising. Ammanambakkam/Thamaraipakkam headmen monitor radios.' },
+            { bg: 'var(--warn)', en: 'STAGE 2: Warning', ta: 'அபாயம் - அணை நிரம்பியது', act: 'Dam overtopping. Keep livestock away from downstream banks.' },
+            { bg: '#ff5722', en: 'STAGE 3: Danger', ta: 'மிக அபாயம் - வெள்ளப்பெருக்கு', act: 'Fast flow. Downstream huts prepare emergency kits.' },
+            { bg: 'var(--danger)', en: 'STAGE 4: EVACUATE', ta: 'வெளியேறவும். 500மீ வடக்கே பஞ்சாயத்து அலுவலகத்திற்குச் செல்லவும்', act: `EVACUATE. Move 500m to high ground immediately. Wave arrives in ~${travelMin.toFixed(0)}${conf} mins. Lead time: ${leadTime.toFixed(0)}m.` }
+        ];
+        
+        badge.style.background = stages[stage].bg;
+        document.getElementById('alertTitleEn').innerText = stages[stage].en;
+        document.getElementById('alertTitleTa').innerText = stages[stage].ta;
+        document.getElementById('alertAction').innerText = stages[stage].act;
+    }
+
+    function updateUI(level, head, ror, vel, travelMin) {
+        document.getElementById('valLevel').innerText = level.toFixed(1);
+        document.getElementById('valHead').innerText = head.toFixed(1);
+        document.getElementById('valRoR').innerText = ror.toFixed(2);
+        document.getElementById('valVel').innerText = vel.toFixed(2);
+        document.getElementById('valArrival').innerText = travelMin > 0 ? travelMin.toFixed(1) : '--';
+        
+        let vizH = Math.min(100, Math.max(5, (level / SENSOR_X_CM) * 100));
+        document.getElementById('vizWater').style.height = vizH + '%';
+    }
+
+    function updateChart() {
+        let labels = history.map(h => new Date(h.t).toLocaleTimeString());
+        let lData = history.map(h => h.level);
+        let rData = history.map(h => h.ror);
+        chart.data.labels = labels;
+        chart.data.datasets[0].data = lData;
+        chart.data.datasets[1].data = rData;
+        chart.update();
+    }
+
+    function logData(jsonStr) {
+        elLog.innerHTML += `<div>${jsonStr}</div>`;
+        elLog.scrollTop = elLog.scrollHeight;
+    }
+
+    // --- WEB SERIAL API ---
+    document.getElementById('btnConnect').addEventListener('click', async () => {
+        if (!("serial" in navigator)) {
+            alert("Web Serial API not supported. Use Chrome/Edge or the Python bridge script.");
+            return;
+        }
+        try {
+            port = await navigator.serial.requestPort();
+            await port.open({ baudRate: 115200 });
+            isConnected = true;
+            elConnStatus.innerText = "Connected (Receiving)";
+            elConnDot.classList.add('active');
+            document.getElementById('btnConnect').style.display = 'none';
+            document.getElementById('btnDisconnect').style.display = 'inline-block';
+            readLoop();
+        } catch (e) {
+            console.error(e);
+            alert("Connection failed. Close Arduino IDE Serial Monitor first. Ensure CP210x/CH340 drivers are installed.");
+        }
+    });
+
+    document.getElementById('btnDisconnect').addEventListener('click', async () => {
+        isConnected = false;
+        if (reader) await reader.cancel();
+        if (inputDone) await inputDone.catch(() => {});
+        if (port) await port.close();
+        elConnStatus.innerText = "Disconnected";
+        elConnDot.classList.remove('active');
+        document.getElementById('btnConnect').style.display = 'inline-block';
+        document.getElementById('btnDisconnect').style.display = 'none';
+    });
+
+    class LineBreakTransformer {
+        constructor() { this.chunks = ""; }
+        transform(chunk, controller) {
+            this.chunks += chunk;
+            const lines = this.chunks.split("\n");
+            this.chunks = lines.pop();
+            lines.forEach(line => controller.enqueue(line));
+        }
+        flush(controller) { if (this.chunks) controller.enqueue(this.chunks); }
+    }
+
+    async function readLoop() {
+        let decoder = new TextDecoderStream();
+        inputDone = port.readable.pipeTo(decoder.writable);
+        inputStream = decoder.readable.pipeThrough(new TransformStream(new LineBreakTransformer()));
+        reader = inputStream.getReader();
+
+        while (true) {
+            const { value, done } = await reader.read();
+            if (value) {
+                lastDataTime = Date.now();
+                try {
+                    const data = JSON.parse(value.trim());
+                    logData(value.trim());
+                    processReading(data);
+                } catch(e) { /* Ignore malformed noise */ }
+            }
+            if (done) { reader.releaseLock(); break; }
+        }
+    }
+
+    // --- SIMULATION ---
+    document.getElementById('btnSimulate').addEventListener('click', () => {
+        isSimulating = !isSimulating;
+        const btn = document.getElementById('btnSimulate');
+        if (isSimulating) {
+            btn.innerText = "Stop SIMULATION";
+            btn.style.background = "var(--danger)";
+            let simDist = SENSOR_X_CM; // Start dry
+            let simFlow = 0;
+            simInterval = setInterval(() => {
+                simDist -= (Math.random() * 1.5 + 0.2); 
+                if(simDist < SENSOR_Y_CM) { // simulate overtopping flow
+                    simFlow += Math.random() * 2 + 1;
+                }
+                if(simDist < 10) simDist = 10;
+                
+                let data = {t: Date.now(), dist_cm: simDist, flow_lpm: simFlow, vib: 0};
+                logData(JSON.stringify(data));
+                processReading(data);
+            }, 1000);
+        } else {
+            btn.innerText = "Start SIMULATION";
+            btn.style.background = "#2196F3";
+            clearInterval(simInterval);
+        }
+    });
+
+    // --- WATCHDOG ---
+    setInterval(() => {
+        if (isConnected && !isSimulating && (Date.now() - lastDataTime > 10000)) {
+            elConnStatus.innerText = "SENSOR OFFLINE (>10s)";
+            elConnStatus.style.color = "var(--danger)";
+            elConnDot.classList.remove('active');
+        } else if (isConnected) {
+            elConnStatus.style.color = "var(--text)";
+            elConnDot.classList.add('active');
+        }
+    }, 2000);
+
+    // CSV
+    document.getElementById('btnCsv').addEventListener('click', () => {
+        let csv = "time_ms,level_cm,ror_cm_min,velocity_ms\n";
+        history.forEach(h => { csv += `${h.t},${h.level.toFixed(2)},${h.ror.toFixed(2)},${h.vel.toFixed(2)}\n`; });
+        let blob = new Blob([csv], {type: 'text/csv'});
+        let a = document.createElement('a');
+        a.href = window.URL.createObjectURL(blob);
+        a.download = "flood_log.csv";
+        a.click();
+    });
+
+    // Calibrate
+    document.getElementById('btnApplyCal').addEventListener('click', () => {
+        SENSOR_X_CM = parseFloat(document.getElementById('calSensorX').value);
+        SENSOR_Y_CM = parseFloat(document.getElementById('calSensorY').value);
+        DAM_CREST_CM = SENSOR_X_CM - SENSOR_Y_CM;
+        
+        reachData.mannings_n = parseFloat(document.getElementById('calN').value);
+        reachData.length_m = parseFloat(document.getElementById('calL').value);
+        PIPE_AREA_M2 = parseFloat(document.getElementById('calArea').value);
+        alert(`Calibration Applied.\nCrest Height calculated as: ${DAM_CREST_CM} cm from bed.`);
+    });
+
+</script>
+</body>
+</html>
